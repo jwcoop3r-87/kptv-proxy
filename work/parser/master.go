@@ -14,7 +14,7 @@ import (
 )
 
 // attributePattern matches KEY=VALUE pairs with optional quoted values.
-var attributePattern = regexp.MustCompile(`([A-Z-]+)=([^,]+|"[^"]*")`)
+var attributePattern = regexp.MustCompile(`([A-Z-]+)=("[^"]*"|[^,]+)`)
 
 // StreamVariant represents a single stream variant from an HLS master playlist with
 // comprehensive metadata for quality assessment and selection. Each variant corresponds
@@ -28,6 +28,8 @@ type StreamVariant struct {
 	Resolution       string // Video resolution in "WIDTHxHEIGHT" format (e.g., "1920x1080")
 	Codecs           string // Comma-separated codec specifications (e.g., "avc1.640028,mp4a.40.2")
 	FrameRate        string // Video frame rate as decimal string (e.g., "29.970", "60.000")
+	AudioGroup       string // HLS AUDIO group referenced by this variant
+	AudioURL         string // Resolved external audio rendition URL
 }
 
 // MasterPlaylistHandler provides comprehensive master playlist parsing capabilities,
@@ -106,12 +108,39 @@ func (mph *MasterPlaylistHandler) IsMediaPlaylist(content string) bool {
 func (mph *MasterPlaylistHandler) ParseMasterPlaylist(content string, baseURL string) ([]StreamVariant, error) {
 	var variants []StreamVariant
 
+	// External HLS audio renditions keyed by GROUP-ID.
+	audioGroups := make(map[string]string)
+	audioDefaults := make(map[string]bool)
+
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	var currentVariant *StreamVariant
 
 	// Process playlist content line by line
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+
+		// Parse external HLS AUDIO renditions.
+		if strings.HasPrefix(line, "#EXT-X-MEDIA:") {
+			attrs := mph.parseAttributes(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
+
+			if attrs["TYPE"] == "AUDIO" {
+				groupID := attrs["GROUP-ID"]
+				uri := attrs["URI"]
+
+				if groupID != "" && uri != "" {
+					resolved := mph.resolveURL(uri, baseURL)
+					isDefault := strings.EqualFold(attrs["DEFAULT"], "YES")
+					_, exists := audioGroups[groupID]
+
+					if !exists || (isDefault && !audioDefaults[groupID]) {
+						audioGroups[groupID] = resolved
+						audioDefaults[groupID] = isDefault
+					}
+				}
+			}
+
+			continue
+		}
 
 		// Parse stream information lines containing variant metadata
 		if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
@@ -142,6 +171,13 @@ func (mph *MasterPlaylistHandler) ParseMasterPlaylist(content string, baseURL st
 	if err := scanner.Err(); err != nil {
 		logger.Error("{parser/master - ParseMasterPlaylist} error scanning playlist: %v", err)
 		return nil, err
+	}
+
+	// Attach external AUDIO rendition URLs to their variants.
+	for i := range variants {
+		if variants[i].AudioGroup != "" {
+			variants[i].AudioURL = audioGroups[variants[i].AudioGroup]
+		}
 	}
 
 	// Validate that at least one variant was successfully parsed
@@ -263,6 +299,7 @@ func (mph *MasterPlaylistHandler) parseStreamInf(line string) (StreamVariant, er
 	variant.Resolution = attributes["RESOLUTION"]
 	variant.Codecs = strings.Trim(attributes["CODECS"], "\"")
 	variant.FrameRate = attributes["FRAME-RATE"]
+	variant.AudioGroup = attributes["AUDIO"]
 
 	// Validate that required bandwidth attribute was successfully parsed
 	if variant.Bandwidth == 0 {

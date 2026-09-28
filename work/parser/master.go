@@ -32,6 +32,50 @@ type StreamVariant struct {
 	AudioURL         string // Resolved external audio rendition URL
 }
 
+// variantResolutionPixels converts WIDTHxHEIGHT to total pixel area.
+func variantResolutionPixels(v StreamVariant) int64 {
+	parts := strings.SplitN(strings.ToLower(strings.TrimSpace(v.Resolution)), "x", 2)
+	if len(parts) != 2 {
+		return 0
+	}
+	w, errW := strconv.Atoi(parts[0])
+	h, errH := strconv.Atoi(parts[1])
+	if errW != nil || errH != nil || w <= 0 || h <= 0 {
+		return 0
+	}
+	return int64(w) * int64(h)
+}
+
+func variantFPS(v StreamVariant) float64 {
+	fps, err := strconv.ParseFloat(v.FrameRate, 64)
+	if err != nil || fps < 0 {
+		return 0
+	}
+	return fps
+}
+
+func variantQualityBitrate(v StreamVariant) int {
+	if v.AverageBandwidth > 0 {
+		return v.AverageBandwidth
+	}
+	return v.Bandwidth
+}
+
+// higherQualityVariant orders variants by quality:
+// resolution first, then frame rate, then bitrate.
+func higherQualityVariant(a, b StreamVariant) bool {
+	if ap, bp := variantResolutionPixels(a), variantResolutionPixels(b); ap != bp {
+		return ap > bp
+	}
+	if af, bf := variantFPS(a), variantFPS(b); af != bf {
+		return af > bf
+	}
+	if ab, bb := variantQualityBitrate(a), variantQualityBitrate(b); ab != bb {
+		return ab > bb
+	}
+	return false
+}
+
 // MasterPlaylistHandler provides comprehensive master playlist parsing capabilities,
 // variant selection algorithms, and URL resolution services. It handles the complexity
 // of HLS master playlists including variant extraction, quality-based sorting, and
@@ -186,10 +230,9 @@ func (mph *MasterPlaylistHandler) ParseMasterPlaylist(content string, baseURL st
 		return nil, nil
 	}
 
-	// Sort variants by bandwidth in descending order (highest quality first)
-	// This ordering facilitates quality selection algorithms that prefer higher quality
+	// Prefer resolution, then frame rate, then bitrate.
 	sort.SliceStable(variants, func(i, j int) bool {
-		return variants[i].Bandwidth > variants[j].Bandwidth
+		return higherQualityVariant(variants[i], variants[j])
 	})
 
 	return variants, nil
@@ -523,9 +566,9 @@ func (mph *MasterPlaylistHandler) GetVariantsOrderedByQuality(variants []StreamV
 	orderedVariants := make([]StreamVariant, len(variants))
 	copy(orderedVariants, variants)
 
-	// Sort copy by bandwidth in descending order (highest quality first)
+	// Apply the same resolution/FPS/bitrate policy.
 	sort.SliceStable(orderedVariants, func(i, j int) bool {
-		return orderedVariants[i].Bandwidth > orderedVariants[j].Bandwidth
+		return higherQualityVariant(orderedVariants[i], orderedVariants[j])
 	})
 
 	return orderedVariants

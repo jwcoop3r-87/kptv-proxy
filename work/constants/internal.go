@@ -216,7 +216,6 @@ type InternalConstants struct {
 	WatcherGracePeriod         time.Duration // Grace period before health checks begin on a new stream
 	WatcherContextStuckTimeout time.Duration // Time a cancelled context must persist before being flagged as stuck
 	WatcherActivityTimeout     int64         // Seconds of no activity before the stream is flagged as stalled
-	WatcherStatsStaleTimeout   time.Duration // Seconds since last stats update before stats are considered stale
 	WatcherLowThroughputBytes  int64         // Minimum bytes between health checks; below this is treated as a stall
 
 	// -------------------------------------------------------------------------
@@ -518,7 +517,6 @@ var Internal = InternalConstants{
 	WatcherGracePeriod:         30 * time.Second,
 	WatcherContextStuckTimeout: 300 * time.Second,
 	WatcherActivityTimeout:     120,
-	WatcherStatsStaleTimeout:   5 * time.Minute,
 	WatcherLowThroughputBytes:  50 * 1024, // 50KB
 	WatcherFailureThreshold:    3,
 	WatcherFailureResetWindow:  15 * time.Minute,

@@ -272,6 +272,12 @@ func (r *Restream) streamWithFFmpegAV(streamURL string, audioURL string, source 
 		// Handle read errors
 		if err != nil {
 			if err == io.EOF {
+				// an idle kill after output had started is a stall: the
+				// session stopped advancing, so the loop restarts the source
+				if idled.Load() && totalBytes > 0 {
+					r.AttemptStalled.Store(true)
+				}
+
 				// Stream ended normally
 				success := totalBytes > constants.Internal.StreamMinViableBytes && !idled.Load()
 				logger.Debug("{restream/ffmpeg - streamWithFFmpeg} Stream ended for channel %s: %d bytes transferred (success: %v)",

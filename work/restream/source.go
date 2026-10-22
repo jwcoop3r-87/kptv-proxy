@@ -107,10 +107,18 @@ func (r *Restream) StreamFromSource(index int) (bool, int64) {
 		for i, variant := range variants {
 			logger.Debug("{restream/restream - StreamFromSource} Channel %s: Testing variant %d (%s)", r.Channel.Name, i, variant.URL)
 
-			if ok, bytes := r.testAndStreamVariant(variant, stream.Source); ok {
+			ok, bytes := r.testAndStreamVariant(variant, stream.Source)
+			if ok {
 				logger.Debug("{restream/restream - StreamFromSource} Channel %s: Successfully streamed variant %d (%s)", r.Channel.Name, i, variant.URL)
 
 				return true, bytes
+			}
+
+			// a stall is restarted by the loop from a fresh master (new
+			// session, best variant), not by dropping to a lower variant
+			// of the session that just stalled
+			if r.AttemptStalled.Load() {
+				return false, bytes
 			}
 		}
 

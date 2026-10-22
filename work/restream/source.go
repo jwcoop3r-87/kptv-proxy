@@ -12,6 +12,7 @@ import (
 	"kptv-proxy/work/metrics"
 	"kptv-proxy/work/parser"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -86,8 +87,11 @@ func (r *Restream) StreamFromSource(index int) (bool, int64) {
 	defer stream.Source.ActiveConns.Add(-1) // ensure decrement when function exits
 
 	// FFmpeg mode hands the URL straight to ffmpeg, but only after the same
-	// dead/blocked checks, rate limiting, and connection accounting as a native fetch
-	if r.Config.FFmpegMode {
+	// dead/blocked checks, rate limiting, and connection accounting as a native fetch.
+	// HLS playlists are resolved below first, so a master playlist streams the
+	// best-ranked variant (with its separate audio rendition, if any) instead
+	// of leaving the choice to ffmpeg.
+	if r.Config.FFmpegMode && !isHLSPlaylistURL(stream.URL) {
 		logger.Debug("{restream/restream - StreamFromSource} Channel %s: Streaming stream %d via FFmpeg", r.Channel.Name, index)
 		return r.streamWithFFmpeg(stream.URL)
 	}
@@ -203,7 +207,13 @@ func (r *Restream) getStreamVariants(url string, source *config.SourceConfig) ([
 	}
 
 	// Parse the body as a master playlist and return variants
-	variants, isMaster, perr := masterHandler.ProcessMasterPlaylistVariants(string(body), url, r.Channel.Name)
+	// Resolve relative variant URIs against the final URL after redirects;
+	// redirecting playlist hosts otherwise produce child URLs that 404
+	baseURL := url
+	if resp.Request != nil && resp.Request.URL != nil {
+		baseURL = resp.Request.URL.String()
+	}
+	variants, isMaster, perr := masterHandler.ProcessMasterPlaylistVariants(string(body), baseURL, r.Channel.Name)
 	if perr != nil {
 		cancel()
 		return nil, false, nil, nil, perr
@@ -234,7 +244,7 @@ func (r *Restream) testAndStreamVariant(variant parser.StreamVariant, source *co
 	// Use FFmpeg if enabled, bypassing all variant testing
 	if r.Config.FFmpegMode {
 		logger.Debug("{restream/restream - testAndStreamVariant} FFmpeg mode enabled for channel %s, bypassing variant test", r.Channel.Name)
-		return r.streamWithFFmpeg(variant.URL)
+		return r.streamWithFFmpegAV(variant.URL, variant.AudioURL, source)
 	}
 
 	// Build HTTP GET request for the variant
@@ -493,4 +503,16 @@ func (r *Restream) streamFromResponse(resp *http.Response, prefix []byte) (bool,
 
 		consecutiveErrors = 0
 	}
+}
+
+// isHLSPlaylistURL reports whether a stream URL points at an HLS playlist. In
+// FFmpeg mode only these are fetched and parsed first; other URLs go straight
+// to ffmpeg so single-use stream URLs are requested once.
+func isHLSPlaylistURL(streamURL string) bool {
+	u, err := neturl.Parse(streamURL)
+	if err != nil {
+		return false
+	}
+	p := strings.ToLower(u.Path)
+	return strings.HasSuffix(p, ".m3u8") || strings.HasSuffix(p, ".m3u")
 }

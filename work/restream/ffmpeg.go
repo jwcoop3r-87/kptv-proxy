@@ -42,16 +42,26 @@ func sanitizeHeaderValue(v string) string {
  * @return (success bool, totalBytes int64) - success indicates if stream was healthy, totalBytes is data transferred
  */
 func (r *Restream) streamWithFFmpeg(streamURL string) (bool, int64) {
-	// Find the source config for this stream URL to get custom headers/user-agent
-	var source *config.SourceConfig
-	r.Channel.Mu.RLock()
-	for _, stream := range r.Channel.Streams {
-		if stream.URL == streamURL || strings.Contains(streamURL, stream.Source.URL) {
-			source = stream.Source
-			break
+	return r.streamWithFFmpegAV(streamURL, "", nil)
+}
+
+// streamWithFFmpegAV runs FFmpeg on streamURL, adding audioURL as a second
+// input when the selected HLS variant carries its audio in a separate
+// EXT-X-MEDIA rendition. source supplies the request headers; when nil it is
+// looked up from the channel's streams. A variant URL resolved from a master
+// playlist often shares nothing with the source URL, so callers that have the
+// source should pass it.
+func (r *Restream) streamWithFFmpegAV(streamURL string, audioURL string, source *config.SourceConfig) (bool, int64) {
+	if source == nil {
+		r.Channel.Mu.RLock()
+		for _, stream := range r.Channel.Streams {
+			if stream.URL == streamURL || strings.Contains(streamURL, stream.Source.URL) {
+				source = stream.Source
+				break
+			}
 		}
+		r.Channel.Mu.RUnlock()
 	}
-	r.Channel.Mu.RUnlock()
 
 	logger.Debug("{restream/ffmpeg - streamWithFFmpeg} Starting FFmpeg for channel %s with URL: %s", r.Channel.Name, streamURL)
 
@@ -76,6 +86,19 @@ func (r *Restream) streamWithFFmpeg(streamURL string) (bool, int64) {
 
 	// Add input URL and output format args
 	args = append(args, "-i", streamURL)
+
+	// Separate audio rendition: same input options and headers as the video,
+	// then map video from the first input and audio from the second
+	if audioURL != "" {
+		args = append(args, r.Config.FFmpegPreInput...)
+		if source != nil && source.UserAgent != "" {
+			args = append(args, "-user_agent", sanitizeHeaderValue(source.UserAgent))
+		}
+		if source != nil && source.ReqReferrer != "" {
+			args = append(args, "-headers", fmt.Sprintf("Referer: %s\r\n", sanitizeHeaderValue(source.ReqReferrer)))
+		}
+		args = append(args, "-i", audioURL, "-map", "0:v:0?", "-map", "1:a:0?")
+	}
 	args = append(args, r.Config.FFmpegPreOutput...)
 	args = append(args, "pipe:1")
 

@@ -145,3 +145,39 @@ func TestStallRestartsAreBounded(t *testing.T) {
 		t.Fatalf("FFmpeg started %d times in 8s, want %d (restarts then fallback)", got, want)
 	}
 }
+
+// A restarted FFmpeg must continue the previous process's output timeline.
+// Each new process otherwise starts its timestamps near zero, and players
+// (Plex) stall on a clock that jumps backwards mid-stream.
+func TestRestartContinuesTimeline(t *testing.T) {
+	runs := fakeFFmpeg(t, `echo "out_time_us=12000000" >&2; echo "progress=continue" >&2; `+ffmpegStall)
+	withIdleTimeout(t, 300*time.Millisecond)
+	r, _ := newSingleStreamRestreamer(t, "http://upstream.invalid")
+
+	for i := 0; i < 2; i++ {
+		runFFmpegAttempt(t, r, 5*time.Second)
+	}
+
+	got := runs()
+	if len(got) != 2 {
+		t.Fatalf("FFmpeg started %d times, want 2", len(got))
+	}
+	offset := func(args string) string {
+		f := strings.Fields(args)
+		for i := range f[:len(f)-1] {
+			if f[i] == "-output_ts_offset" {
+				return f[i+1]
+			}
+		}
+		return "none"
+	}
+	// first run starts the session timeline at 0; the restart picks up after
+	// the 12s the first run reported, plus the safety gap
+	want := fmt.Sprintf("%.3f", (12*time.Second + constants.Internal.FFmpegTimelineGap).Seconds())
+	if o := offset(got[0]); o != "0.000" {
+		t.Errorf("first run -output_ts_offset = %s, want 0.000", o)
+	}
+	if o := offset(got[1]); o != want {
+		t.Errorf("restart -output_ts_offset = %s, want %s", o, want)
+	}
+}

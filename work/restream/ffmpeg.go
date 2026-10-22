@@ -10,6 +10,7 @@ import (
 	"kptv-proxy/work/logger"
 	"kptv-proxy/work/metrics"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -67,7 +68,10 @@ func (r *Restream) streamWithFFmpegAV(streamURL string, audioURL string, source 
 
 	// Build FFmpeg command arguments
 	// Start with base args to suppress banner and set error-only logging
-	args := []string{"-hide_banner", "-loglevel", "error"}
+	// -progress reports the output position on stderr so a restart can
+	// continue this session's timeline (see TimelineOffset below)
+	args := []string{"-hide_banner", "-loglevel", "error",
+		"-progress", "pipe:2", "-stats_period", fmt.Sprintf("%.3f", constants.Internal.FFmpegProgressPeriod.Seconds())}
 	args = append(args, r.Config.FFmpegPreInput...)
 
 	// Add custom User-Agent if configured for this source
@@ -100,6 +104,12 @@ func (r *Restream) streamWithFFmpegAV(streamURL string, audioURL string, source 
 		args = append(args, "-i", audioURL, "-map", "0:v:0?", "-map", "1:a:0?")
 	}
 	args = append(args, r.Config.FFmpegPreOutput...)
+
+	// Each FFmpeg starts its output clock near zero. Within one client
+	// session, start this one where the previous process left off; a clock
+	// that jumps backwards mid-stream stalls players such as Plex.
+	timelineOffset := time.Duration(r.TimelineOffset.Load()) * time.Microsecond
+	args = append(args, "-output_ts_offset", fmt.Sprintf("%.3f", timelineOffset.Seconds()))
 	args = append(args, "pipe:1")
 
 	logger.Debug("{restream/ffmpeg - streamWithFFmpeg} Command args for channel %s: %v", r.Channel.Name, args)
@@ -134,6 +144,17 @@ func (r *Restream) streamWithFFmpegAV(streamURL string, audioURL string, source 
 
 	logger.Debug("{restream/ffmpeg - streamWithFFmpeg} Process started for channel %s with PID: %d", r.Channel.Name, cmd.Process.Pid)
 
+	// Advance the session timeline past this process's output once it has
+	// exited (deferred before the kill below, so it runs after it). The last
+	// progress report can trail the real output by up to one period, which
+	// FFmpegTimelineGap covers, so the next process never starts earlier.
+	var lastOutUs atomic.Int64
+	defer func() {
+		if out := lastOutUs.Load(); out > 0 {
+			r.TimelineOffset.Add(out + constants.Internal.FFmpegTimelineGap.Microseconds())
+		}
+	}()
+
 	// Ensure FFmpeg process is killed on exit (even if goroutine panics)
 	// Using negative PID kills the entire process group
 	defer func() {
@@ -162,8 +183,20 @@ func (r *Restream) streamWithFFmpegAV(streamURL string, audioURL string, source 
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
+			line := scanner.Text()
+
+			// -progress key=value lines: keep the output position, don't log them
+			if key, value, ok := strings.Cut(line, "="); ok && !strings.Contains(key, " ") {
+				if key == "out_time_us" {
+					if us, err := strconv.ParseInt(value, 10, 64); err == nil && us > 0 {
+						lastOutUs.Store(us)
+					}
+				}
+				continue
+			}
+
 			// Log FFmpeg errors/warnings as debug since we already log major errors separately
-			logger.Debug("{restream/ffmpeg - streamWithFFmpeg} Channel %s: %s", r.Channel.Name, scanner.Text())
+			logger.Debug("{restream/ffmpeg - streamWithFFmpeg} Channel %s: %s", r.Channel.Name, line)
 		}
 		if err := scanner.Err(); err != nil {
 			logger.Error("{restream/ffmpeg - streamWithFFmpeg} reading stderr for channel %s: %v", r.Channel.Name, err)

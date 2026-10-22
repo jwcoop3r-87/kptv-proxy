@@ -128,6 +128,8 @@ type InternalConstants struct {
 	FFmpegMaxConsecutiveErrors   int           // Max consecutive read/write errors before the FFmpeg loop aborts
 	FFmpegLogProgressInterval    int64         // Byte interval at which FFmpeg streaming progress is logged
 	FFmpegClientBufferChunks     int           // WriteChan depth for FFmpeg mode clients (larger to absorb burst output)
+	FFmpegProgressPeriod         time.Duration // How often FFmpeg reports its output position (-stats_period)
+	FFmpegTimelineGap            time.Duration // Gap left between one FFmpeg's last reported output time and the next one's first timestamp; must exceed FFmpegProgressPeriod
 
 	// -------------------------------------------------------------------------
 	// work/restream/ffmpeg.go — stopFFmpeg()
@@ -460,6 +462,8 @@ var Internal = InternalConstants{
 	FFmpegMaxConsecutiveErrors:   10,
 	FFmpegLogProgressInterval:    20 * 1024 * 1024, // 20MB
 	FFmpegClientBufferChunks:     128,
+	FFmpegProgressPeriod:         250 * time.Millisecond,
+	FFmpegTimelineGap:            500 * time.Millisecond,
 
 	// -------------------------------------------------------------------------
 	// Stats

@@ -11,6 +11,7 @@ import (
 	"kptv-proxy/work/logger"
 	"kptv-proxy/work/metrics"
 	"kptv-proxy/work/parser"
+	"kptv-proxy/work/types"
 	"net/http"
 	neturl "net/url"
 	"strconv"
@@ -45,26 +46,21 @@ func (r *Restream) StreamFromSource(index int) (bool, int64) {
 	stream := r.Channel.Streams[index]
 	r.Channel.Mu.RUnlock()
 
-	// Check if the stream was previously marked as dead, but allow occasional retries
-	if deadstreams.IsStreamDead(r.Channel.Name, stream.URLHash) {
-		deadReason := deadstreams.GetDeadStreamReason(r.Channel.Name, stream.URLHash)
-		if deadReason == "manual" {
-			// Always skip manually killed streams
-			logger.Debug("{restream/restream - StreamFromSource} Channel %s: Stream %d is manually marked dead", r.Channel.Name, index)
-
-			return false, 0
-		}
-		// For auto-blocked streams, skip most of the time but allow occasional retry
-		logger.Debug("{restream/restream - StreamFromSource} Channel %s: Stream %d is marked dead (reason: %s)", r.Channel.Name, index, deadReason)
+	// Dead and blocked streams are skipped; an auto-blocked one is probed again
+	// once its retry interval has passed (see blockedUntilRetry)
+	if blockedUntilRetry(r.Channel.Name, stream) {
+		logger.Debug("{restream/restream - StreamFromSource} Channel %s: Stream %d is dead or blocked", r.Channel.Name, index)
 
 		return false, 0
 	}
-
-	// Skip stream if explicitly blocked
-	if atomic.LoadInt32(&stream.Blocked) == 1 {
-		logger.Debug("{restream/restream - StreamFromSource} Channel %s: Stream %d is blocked", r.Channel.Name, index)
-
-		return false, 0
+	if dead := deadstreams.IsStreamDead(r.Channel.Name, stream.URLHash); dead || atomic.LoadInt32(&stream.Blocked) == 1 {
+		logger.Info("{restream/restream - StreamFromSource} Channel %s: Retrying auto-blocked stream %d", r.Channel.Name, index)
+		atomic.StoreInt32(&stream.Blocked, 0)
+		if dead {
+			if err := deadstreams.ReviveStream(r.Channel.Name, stream.URLHash); err != nil {
+				logger.Error("{restream/restream - StreamFromSource} Channel %s: Failed to clear auto-block for stream %d: %v", r.Channel.Name, index, err)
+			}
+		}
 	}
 
 	// CRITICAL: Apply rate limiting BEFORE attempting connection to provider
@@ -515,4 +511,25 @@ func isHLSPlaylistURL(streamURL string) bool {
 	}
 	p := strings.ToLower(u.Path)
 	return strings.HasSuffix(p, ".m3u8") || strings.HasSuffix(p, ".m3u")
+}
+
+// blockedUntilRetry reports whether a dead or blocked stream must still be
+// skipped. Manually killed streams always are. Auto-blocked streams become
+// eligible again once AutoBlockRetryInterval has passed since their last
+// failure, or straight away when none is on record this run (the block
+// persists in the database across restarts); a failed probe re-blocks
+// through the usual failure path.
+func blockedUntilRetry(channelName string, s *types.Stream) bool {
+	dead := deadstreams.IsStreamDead(channelName, s.URLHash)
+	if dead && deadstreams.GetDeadStreamReason(channelName, s.URLHash) == "manual" {
+		return true
+	}
+	if !dead && atomic.LoadInt32(&s.Blocked) == 0 {
+		return false
+	}
+
+	s.Mu.Lock()
+	sinceFail := time.Since(s.LastFail)
+	s.Mu.Unlock()
+	return sinceFail < constants.Internal.AutoBlockRetryInterval
 }

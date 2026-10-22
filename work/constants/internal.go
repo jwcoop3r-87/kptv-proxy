@@ -24,6 +24,7 @@ type InternalConstants struct {
 	// -------------------------------------------------------------------------
 	StreamMaxAttemptsMultiplier       int           // Multiplier applied to stream count to derive max total attempts
 	StreamConsecutiveFailureThreshold int           // Consecutive failures before a stream is marked for auto-blocking
+	AutoBlockRetryInterval            time.Duration // Time after its last failure before an auto-blocked stream is probed again
 	StreamMinViableBytes              int64         // Minimum bytes transferred for a stream attempt to be deemed viable
 	ClientWriteTimeout                time.Duration // Max time to wait for a single client write before dropping slow client
 
@@ -362,6 +363,7 @@ var Internal = InternalConstants{
 	// -------------------------------------------------------------------------
 	StreamMaxAttemptsMultiplier:       2,
 	StreamConsecutiveFailureThreshold: 2,
+	AutoBlockRetryInterval:            5 * time.Minute,
 	StreamMinViableBytes:              64 * 1024, // 64KB — matches BriefSuccessThreshold; gate for "got real data" on cancel/no-client exits
 
 	// -------------------------------------------------------------------------
